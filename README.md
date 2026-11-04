@@ -41,8 +41,8 @@ publishes the new data within a minute or so — the page itself never needs to 
 regenerated.
 
 ```sh
-# Add trails (any number of URLs). Each one becomes trails/<id>.geojson with status "todo";
-# the id is the URL slug, override it with --id, and the name with --name.
+# Add trails (any number of URLs). Each one becomes trails/<id>.geojson with status "todo"
+# (or pass --status done); the id is the URL slug, override it with --id, and the name with --name.
 python3 tools/trails.py import https://www.wikiloc.com/hiking-trails/dipotamos-reservoir-163364159
 
 # If Wikiloc refuses the download, save the page from a browser and import the file:

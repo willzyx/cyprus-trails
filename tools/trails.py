@@ -5,7 +5,7 @@ Imports public Wikiloc trails into one GeoJSON file per trail under
 ``trails/`` and maintains ``trails/index.json``, the list of trails together
 with their done/todo status. Uses the Python standard library only.
 
-    python3 tools/trails.py import URL [URL ...] [--id ID] [--name NAME] [--html FILE] [--force]
+    python3 tools/trails.py import URL [URL ...] [--id ID] [--name NAME] [--html FILE] [--force] [--status done|todo]
     python3 tools/trails.py refresh ID [ID ...] | --all
     python3 tools/trails.py mark ID done|todo
     python3 tools/trails.py list
@@ -429,7 +429,10 @@ def ids_by_source() -> dict:
 # --------------------------------------------------------------------------
 
 def import_trail(url: str, *, trail_id: str | None = None, name: str | None = None,
-                 page_html: str | None = None, force: bool = False, keep_name: bool = False) -> str:
+                 page_html: str | None = None, force: bool = False, keep_name: bool = False,
+                 status: str | None = None) -> str:
+    """Import one trail. ``status`` sets its status; by default a new trail is "todo" and an
+    existing one keeps its status."""
     source = parse_wikiloc_url(url)
     existing = ids_by_source().get(source["num"])
     trail_id = trail_id or existing or source["slug"]
@@ -451,7 +454,10 @@ def import_trail(url: str, *, trail_id: str | None = None, name: str | None = No
     write_json(path, collection)
 
     index = load_index()
-    index.setdefault(trail_id, {"status": "todo"})
+    if status:
+        index[trail_id] = {"status": status}
+    else:
+        index.setdefault(trail_id, {"status": "todo"})
     save_index(index)
 
     props = collection["features"][0]["properties"]
@@ -469,7 +475,8 @@ def cmd_import(args) -> int:
     failed = 0
     for url in args.urls:
         try:
-            import_trail(url, trail_id=args.id, name=args.name, page_html=page_html, force=args.force)
+            import_trail(url, trail_id=args.id, name=args.name, page_html=page_html, force=args.force,
+                         status=args.status)
         except TrailError as exc:
             print(f"error: {url}: {exc}", file=sys.stderr)
             failed += 1
@@ -641,6 +648,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--name", help="display name (default: the name on Wikiloc)")
     p.add_argument("--html", metavar="FILE", help="read a page saved from the browser instead of downloading it")
     p.add_argument("--force", action="store_true", help="overwrite an existing trail file")
+    p.add_argument("--status", choices=STATUSES, help="set the status (default: todo for new trails)")
     p.set_defaults(func=cmd_import)
 
     p = sub.add_parser("refresh", help="re-import trails from their saved source_url, keeping name and status")
