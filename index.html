@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Cyprus Hiking Trails Map — Done & To-Do Trails with Live Location</title>
+  <meta name="description" content="Personal map of hiking trails in Cyprus: walked and not-yet-walked trails drawn as 100 m wide bands, with live GPS location and the distance to the nearest trail.">
+  <meta name="robots" content="noindex, nofollow">
+  <link rel="canonical" href="https://willzyx.github.io/cyprus-trails/">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Cyprus Hiking Trails Map">
+  <meta property="og:description" content="Personal map of hiking trails in Cyprus: walked and not-yet-walked trails drawn as 100 m wide bands, with live GPS location and the distance to the nearest trail.">
+  <meta property="og:url" content="https://willzyx.github.io/cyprus-trails/">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Cyprus Hiking Trails Map">
+  <meta name="twitter:description" content="Personal map of hiking trails in Cyprus: walked and not-yet-walked trails drawn as 100 m wide bands, with live GPS location and the distance to the nearest trail.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🥾</text></svg>">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    html, body { height: 100%; margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; }
+    #map { position: absolute; inset: 0; background: #ddd; }
+
+    #panel {
+      position: absolute;
+      left: 12px;
+      right: 12px;
+      bottom: 12px;
+      z-index: 1000;
+      background: rgba(20, 22, 26, 0.92);
+      color: #f2f2f2;
+      border-radius: 12px;
+      padding: 10px 14px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.35);
+      font-size: 14px;
+      line-height: 1.45;
+      max-width: 420px;
+    }
+    #panel b { font-weight: 700; }
+    #panel .hint { color: #9e9e9e; font-size: 12px; }
+    #panel .status { color: #ffb74d; }
+    #gps { margin-top: 4px; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.12); }
+    #gps:empty { display: none; }
+    #gps .on-trail { color: #81c784; font-weight: 700; }
+    #gps .off-trail { color: #4fc3f7; font-weight: 700; }
+
+    .swatch {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+      margin-right: 5px;
+      vertical-align: -1px;
+    }
+    .swatch.done { background: #7b1fa2; }
+    .swatch.todo { background: #ef6c00; }
+
+    #locate-btn {
+      position: absolute;
+      right: 12px;
+      bottom: 130px;
+      z-index: 1000;
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      border: none;
+      background: #546e7a;
+      color: white;
+      font-size: 20px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+      cursor: pointer;
+    }
+    #locate-btn.active { background: #1976d2; }
+    #locate-btn:active { background: #125ea3; }
+
+    .leaflet-popup-content { font-size: 13px; line-height: 1.45; }
+    .leaflet-popup-content .title { font-size: 14px; font-weight: 700; margin-bottom: 2px; }
+    .leaflet-popup-content .badge {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      padding: 1px 6px;
+      border-radius: 4px;
+      color: #fff;
+      margin-bottom: 4px;
+    }
+    .leaflet-popup-content .badge.done { background: #7b1fa2; }
+    .leaflet-popup-content .badge.todo { background: #ef6c00; }
+    .leaflet-popup-content .muted { color: #757575; }
+    .leaflet-popup-content code { font-size: 11px; background: #f1f1f1; padding: 1px 4px; border-radius: 3px; word-break: break-all; }
+
+    .leaflet-control-attribution {
+      max-width: 60vw;
+      white-space: normal;
+      font-size: 11px;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <button id="locate-btn" title="Center on my location and follow">📍</button>
+  <div id="panel">
+    <div id="summary">Loading trails…</div>
+    <div id="gps"></div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+  (function () {
+    'use strict';
+
+    var CYPRUS_CENTER = [35.05, 33.2];
+    var INDEX_URL = 'trails/index.json';
+    var BAND_RADIUS_M = 50;          // each trail is drawn as a band of ±50 m around the track
+    var BAND_MIN_PX = 4;             // keep bands visible when zoomed out
+    var BAND_OPACITY = 0.45;
+    var WAYPOINT_MIN_ZOOM = 14;
+    var FOLLOW_ZOOM = 15;
+    var EARTH_CIRCUMFERENCE_M = 40075016.686;
+    var EARTH_RADIUS_M = 6371008.8;
+    var BASE_LAYER_KEY = 'cyprus-trails:base-layer';
+    var STYLE = {
+      done: { band: '#7b1fa2', line: '#4a148c', label: 'Done' },
+      todo: { band: '#ef6c00', line: '#bf360c', label: 'Not done' }
+    };
+
+    var map = L.map('map', { zoomControl: true, attributionControl: false, maxZoom: 19 }).setView(CYPRUS_CENTER, 9);
+
+    var OSM_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+    var baseLayers = {
+      'OpenStreetMap': L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: OSM_ATTRIBUTION
+      }),
+      'Topographic': L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+        maxNativeZoom: 17,
+        maxZoom: 19,
+        attribution: OSM_ATTRIBUTION + ', SRTM | Style: &copy; <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)'
+      }),
+      'Satellite': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        maxNativeZoom: 18,
+        maxZoom: 19,
+        attribution: 'Imagery &copy; Esri, Maxar, Earthstar Geographics'
+      })
+    };
+    var savedBase = null;
+    try { savedBase = localStorage.getItem(BASE_LAYER_KEY); } catch (e) { /* storage unavailable */ }
+    (baseLayers[savedBase] || baseLayers.OpenStreetMap).addTo(map);
+    map.on('baselayerchange', function (e) {
+      try { localStorage.setItem(BASE_LAYER_KEY, e.name); } catch (err) { /* storage unavailable */ }
+    });
+
+    // Panes, bottom to top. Bands are drawn opaque inside a semi-transparent pane, so
+    // overlapping bands do not darken each other and a done band fully covers a todo one.
+    function createPane(name, zIndex, opacity) {
+      var pane = map.createPane(name);
+      pane.style.zIndex = zIndex;
+      pane.style.pointerEvents = 'none';  // only interactive paths take clicks
+      if (opacity != null) pane.style.opacity = opacity;
+    }
+    createPane('bands', 410, BAND_OPACITY);
+    createPane('centerlines', 420);
+    createPane('waypoints', 430);
+    createPane('position', 440);
+
+    var groups = { todo: L.layerGroup().addTo(map), done: L.layerGroup().addTo(map) };
+    var waypointGroups = { todo: L.layerGroup(), done: L.layerGroup() };
+
+    var overlays = {};
+    overlays['<span class="swatch done"></span>' + STYLE.done.label] = groups.done;
+    overlays['<span class="swatch todo"></span>' + STYLE.todo.label] = groups.todo;
+    L.control.layers(baseLayers, overlays, { position: 'topright' }).addTo(map);
+    L.control.attribution({ position: 'topright', prefix: false }).addTo(map);
+
+    var summaryEl = document.getElementById('summary');
+    var gpsEl = document.getElementById('gps');
+    var locateBtn = document.getElementById('locate-btn');
+
+    var trails = [];
+    var userMarker = null;
+    var accuracyCircle = null;
+    var lastPosition = null;
+    var watchId = null;
+    var follow = false;
+    var centerOnNextFix = false;
+
+    function escapeHtml(str) {
+      var div = document.createElement('div');
+      div.textContent = str == null ? '' : String(str);
+      return div.innerHTML;
+    }
+
+    function formatKm(km) {
+      return (Math.round(km * 10) / 10).toFixed(1);
+    }
+
+    function formatDistance(meters) {
+      if (meters < 1000) return Math.round(meters) + ' m';
+      return (meters / 1000).toFixed(meters < 10000 ? 2 : 1) + ' km';
+    }
+
+    function isWikilocUrl(url) {
+      return typeof url === 'string' && /^https:\/\/([a-z]{2,3}\.)?wikiloc\.com\/[^\s"'<>]+$/.test(url);
+    }
+
+    // ---- Bands: stroke width that equals 2 × BAND_RADIUS_M on the ground ------------
+
+    function metersPerPixel() {
+      var lat = map.getCenter().lat * Math.PI / 180;
+      return EARTH_CIRCUMFERENCE_M * Math.cos(lat) / Math.pow(2, map.getZoom() + 8);
+    }
+
+    function bandWeight() {
+      return Math.max(BAND_MIN_PX, 2 * BAND_RADIUS_M / metersPerPixel());
+    }
+
+    function updateBandWidths() {
+      var weight = bandWeight();
+      trails.forEach(function (t) { t.band.setStyle({ weight: weight }); });
+    }
+
+    function keepDoneOnTop() {
+      groups.done.eachLayer(function (layer) { layer.bringToFront(); });
+    }
+
+    function updateWaypoints() {
+      ['done', 'todo'].forEach(function (status) {
+        var show = map.getZoom() >= WAYPOINT_MIN_ZOOM && map.hasLayer(groups[status]);
+        var group = waypointGroups[status];
+        if (show && !map.hasLayer(group)) group.addTo(map);
+        if (!show && map.hasLayer(group)) map.removeLayer(group);
+      });
+    }
+
+    map.on('zoomend', function () {
+      updateBandWidths();
+      updateWaypoints();
+    });
+    map.on('overlayadd overlayremove', function () {
+      keepDoneOnTop();
+      updateWaypoints();
+    });
+
+    // ---- Trails ------------------------------------------------------------------
+
+    function parseTrail(id, entry, collection) {
+      var track = null;
+      var waypoints = [];
+      (collection.features || []).forEach(function (f) {
+        var kind = f.properties && f.properties.kind;
+        if (kind === 'track' && !track) track = f;
+        else if (kind === 'waypoint' && f.geometry && f.geometry.type === 'Point') waypoints.push(f);
+      });
+      if (!track || !track.geometry) throw new Error('no track in file');
+      var g = track.geometry;
+      var lines = g.type === 'LineString' ? [g.coordinates] : g.type === 'MultiLineString' ? g.coordinates : null;
+      if (!lines) throw new Error('unsupported geometry ' + g.type);
+      return {
+        id: id,
+        status: entry && entry.status === 'done' ? 'done' : 'todo',
+        props: track.properties || {},
+        latlngs: lines.map(function (line) {
+          return line.map(function (c) { return [c[1], c[0]]; });
+        }),
+        waypoints: waypoints
+      };
+    }
+
+    function popupHtml(t) {
+      var p = t.props;
+      var html = '<div class="title">' + escapeHtml(p.name || t.id) + '</div>';
+      html += '<span class="badge ' + t.status + '">' +
+        (t.status === 'done' ? 'DONE' : 'NOT DONE YET') + '</span><br>';
+      var facts = [];
+      if (p.distance_km != null) facts.push(escapeHtml(p.distance_km) + ' km');
+      if (p.ascent_m != null) facts.push('↑ ' + escapeHtml(p.ascent_m) + ' m', '↓ ' + escapeHtml(p.descent_m) + ' m');
+      if (facts.length) html += facts.join(' · ') + '<br>';
+      var more = [];
+      if (p.ele_min_m != null) more.push('Elevation ' + Math.round(p.ele_min_m) + '–' + Math.round(p.ele_max_m) + ' m');
+      if (p.difficulty) more.push(escapeHtml(p.difficulty));
+      more.push(p.trail_type ? escapeHtml(p.trail_type) : p.loop ? 'Loop' : 'One way');
+      html += '<span class="muted">' + more.join(' · ') + '</span><br>';
+      if (isWikilocUrl(p.source_url)) {
+        html += '<a href="' + escapeHtml(p.source_url) + '" target="_blank" rel="noopener">Open on Wikiloc ↗</a><br>';
+      }
+      html += '<code>' + escapeHtml(t.id) + '</code>';
+      return html;
+    }
+
+    function renderTrail(t) {
+      var style = STYLE[t.status];
+      t.band = L.polyline(t.latlngs, {
+        pane: 'bands',
+        color: style.band,
+        opacity: 1,
+        weight: bandWeight(),
+        lineCap: 'round',
+        lineJoin: 'round',
+        noClip: true   // a clipped wide stroke would end abruptly near the screen edge
+      }).bindPopup(function () { return popupHtml(t); }, { maxWidth: 280 });
+      t.line = L.polyline(t.latlngs, {
+        pane: 'centerlines',
+        color: style.line,
+        opacity: 0.9,
+        weight: 2,
+        interactive: false
+      });
+      groups[t.status].addLayer(t.band).addLayer(t.line);
+
+      t.waypoints.forEach(function (wp) {
+        var c = wp.geometry.coordinates;
+        var name = (wp.properties && wp.properties.name) || 'Waypoint';
+        var type = wp.properties && wp.properties.type;
+        L.circleMarker([c[1], c[0]], {
+          pane: 'waypoints',
+          radius: 5,
+          color: '#fff',
+          weight: 1.5,
+          fillColor: style.line,
+          fillOpacity: 1
+        }).bindPopup('<b>' + escapeHtml(name) + '</b>' +
+          (type && type !== name ? '<br><span class="muted">' + escapeHtml(type) + '</span>' : '') +
+          (c.length > 2 ? '<br><span class="muted">' + Math.round(c[2]) + ' m</span>' : '') +
+          '<br><span class="muted">' + escapeHtml(t.props.name || t.id) + '</span>')
+          .addTo(waypointGroups[t.status]);
+      });
+    }
+
+    function renderSummary() {
+      var count = { done: 0, todo: 0 };
+      var km = { done: 0, todo: 0 };
+      trails.forEach(function (t) {
+        count[t.status] += 1;
+        km[t.status] += t.props.distance_km || 0;
+      });
+      var total = count.done + count.todo;
+      if (!total) {
+        summaryEl.innerHTML = '<div class="hint">No trails yet.</div>';
+        return;
+      }
+      summaryEl.innerHTML =
+        '<span class="swatch done"></span>Done <b>' + count.done + '</b> / ' + total + ' trails · ' +
+        '<b>' + formatKm(km.done) + '</b> / ' + formatKm(km.done + km.todo) + ' km<br>' +
+        '<span class="hint"><span class="swatch todo"></span>Not done · bands are ±' + BAND_RADIUS_M + ' m around the track</span>';
+    }
+
+    // ---- Location ----------------------------------------------------------------
+
+    // Distance from (lat, lng) to the nearest point of the trail, in meters. Uses a local
+    // equirectangular projection, which is accurate to well under 1% at these distances.
+    function distanceToTrail(lat, lng, t) {
+      var k = EARTH_RADIUS_M * Math.PI / 180;
+      var kx = k * Math.cos(lat * Math.PI / 180);
+      var best = Infinity;
+      t.latlngs.forEach(function (line) {
+        var ax = 0, ay = 0;
+        for (var i = 0; i < line.length; i++) {
+          var bx = (line[i][1] - lng) * kx;
+          var by = (line[i][0] - lat) * k;
+          if (i === 0) {
+            best = Math.min(best, Math.sqrt(bx * bx + by * by));
+          } else {
+            var dx = bx - ax, dy = by - ay;
+            var len2 = dx * dx + dy * dy;
+            var s = len2 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len2)) : 0;
+            var px = ax + s * dx, py = ay + s * dy;
+            best = Math.min(best, Math.sqrt(px * px + py * py));
+          }
+          ax = bx;
+          ay = by;
+        }
+      });
+      return best;
+    }
+
+    function renderGps(lat, lng, accuracy) {
+      var nearest = null;
+      var nearestDist = Infinity;
+      trails.forEach(function (t) {
+        var d = distanceToTrail(lat, lng, t);
+        if (d < nearestDist) {
+          nearestDist = d;
+          nearest = t;
+        }
+      });
+      var acc = '<span class="hint"> · ±' + Math.round(accuracy) + ' m</span>';
+      if (!nearest) {
+        gpsEl.innerHTML = 'Location found' + acc;
+        return;
+      }
+      var name = '<b>' + escapeHtml(nearest.props.name || nearest.id) + '</b>';
+      var status = '<span class="hint"> (' + STYLE[nearest.status].label.toLowerCase() + ')</span>';
+      if (nearestDist <= BAND_RADIUS_M) {
+        gpsEl.innerHTML = '<span class="on-trail">On trail</span> ' + name + status +
+          '<br><span class="hint">' + formatDistance(nearestDist) + ' from the track</span>' + acc;
+      } else {
+        gpsEl.innerHTML = '<span class="off-trail">' + formatDistance(nearestDist) + '</span> to ' + name + status + acc;
+      }
+    }
+
+    function setFollow(on) {
+      follow = on;
+      locateBtn.classList.toggle('active', on);
+    }
+
+    function onPosition(pos) {
+      var lat = pos.coords.latitude;
+      var lng = pos.coords.longitude;
+      var accuracy = pos.coords.accuracy;
+      lastPosition = [lat, lng];
+
+      if (!userMarker) {
+        accuracyCircle = L.circle(lastPosition, {
+          pane: 'position', radius: accuracy, color: '#1976d2', weight: 1, fillOpacity: 0.08, interactive: false
+        }).addTo(map);
+        userMarker = L.circleMarker(lastPosition, {
+          pane: 'position', radius: 7, color: '#ffffff', weight: 2, fillColor: '#1976d2', fillOpacity: 1, interactive: false
+        }).addTo(map);
+      } else {
+        userMarker.setLatLng(lastPosition);
+        accuracyCircle.setLatLng(lastPosition);
+        accuracyCircle.setRadius(accuracy);
+      }
+
+      if (centerOnNextFix) {
+        centerOnNextFix = false;
+        map.setView(lastPosition, Math.max(map.getZoom(), FOLLOW_ZOOM));
+      } else if (follow) {
+        map.panTo(lastPosition);
+      }
+      renderGps(lat, lng, accuracy);
+    }
+
+    function onPositionError(err) {
+      gpsEl.innerHTML = '<span class="status">Location unavailable: ' + escapeHtml(err.message) + '</span>';
+      if (err.code === err.PERMISSION_DENIED && watchId != null) {
+        navigator.geolocation.clearWatch(watchId);
+        watchId = null;
+      }
+    }
+
+    function startGeolocation() {
+      if (!navigator.geolocation) {
+        gpsEl.innerHTML = '<span class="status">Your browser does not support geolocation.</span>';
+        return;
+      }
+      if (watchId != null) return;
+      if (!lastPosition) gpsEl.innerHTML = '<span class="hint">Waiting for location…</span>';
+      watchId = navigator.geolocation.watchPosition(onPosition, onPositionError, {
+        enableHighAccuracy: true,
+        maximumAge: 5000,
+        timeout: 20000
+      });
+    }
+
+    locateBtn.addEventListener('click', function () {
+      setFollow(true);
+      if (lastPosition) {
+        map.setView(lastPosition, Math.max(map.getZoom(), FOLLOW_ZOOM));
+      } else {
+        centerOnNextFix = true;
+        startGeolocation();
+      }
+    });
+    map.on('dragstart', function () { setFollow(false); });
+
+    // ---- Load --------------------------------------------------------------------
+
+    function getJson(url, options) {
+      return fetch(url, options).then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      });
+    }
+
+    getJson(INDEX_URL, { cache: 'no-cache' })
+      .then(function (index) {
+        var ids = Object.keys(index);
+        return Promise.all(ids.map(function (id) {
+          return getJson('trails/' + encodeURIComponent(id) + '.geojson')
+            .then(function (collection) { return parseTrail(id, index[id], collection); })
+            .catch(function (err) {
+              console.warn('Failed to load trail ' + id + ': ' + err.message);
+              return null;
+            });
+        })).then(function (loaded) {
+          var failed = loaded.filter(function (t) { return !t; }).length;
+          trails = loaded.filter(Boolean);
+          // todo first, done last: within the bands pane later paths are drawn on top
+          trails.filter(function (t) { return t.status === 'todo'; }).forEach(renderTrail);
+          trails.filter(function (t) { return t.status === 'done'; }).forEach(renderTrail);
+          renderSummary();
+          if (failed) {
+            summaryEl.innerHTML += '<div class="status">' + failed + ' trail(s) failed to load</div>';
+          }
+          if (trails.length) {
+            var bounds = L.latLngBounds([]);
+            trails.forEach(function (t) { bounds.extend(t.band.getBounds()); });
+            map.fitBounds(bounds, { paddingTopLeft: [20, 20], paddingBottomRight: [20, 110], maxZoom: 15 });
+          }
+          updateWaypoints();
+          startGeolocation();
+        });
+      })
+      .catch(function (err) {
+        summaryEl.innerHTML = '<span class="status">Failed to load trails: ' + escapeHtml(err.message) + '</span>';
+      });
+  })();
+  </script>
+</body>
+</html>
