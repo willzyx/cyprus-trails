@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Command-line tool for the Cyprus Trails map.
 
-Imports public Wikiloc trails into one GeoJSON file per trail under
-``trails/`` and maintains ``trails/index.json``, the list of trails together
-with their done/todo status. Uses the Python standard library only.
+Imports public Wikiloc trails and GPX files (e.g. routes drawn on gpx.studio)
+into one GeoJSON file per trail under ``trails/`` and maintains
+``trails/index.json``, the list of trails together with their done/todo status.
+Uses the Python standard library only.
 
-    python3 tools/trails.py import URL [URL ...] [--id ID] [--name NAME] [--html FILE] [--force] [--status done|todo]
+    python3 tools/trails.py import URL|FILE.gpx [...] [--id ID] [--name NAME] [--html FILE] [--force] [--status done|todo]
     python3 tools/trails.py refresh ID [ID ...] | --all
     python3 tools/trails.py mark ID done|todo
     python3 tools/trails.py list
@@ -22,9 +23,11 @@ import json
 import math
 import re
 import sys
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -236,6 +239,84 @@ def fetch_page(url: str) -> str:
 
 
 # --------------------------------------------------------------------------
+# GPX files
+# --------------------------------------------------------------------------
+
+def slugify(text: str) -> str:
+    ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", "-", ascii_text.lower()).strip("-")
+
+
+def _local(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]  # drop the XML namespace
+
+
+def _children(element, name: str) -> list:
+    return [child for child in element if _local(child.tag) == name]
+
+
+def _child_text(element, name: str) -> str:
+    found = _children(element, name)
+    return (found[0].text or "").strip() if found else ""
+
+
+def _gpx_point(element) -> tuple:
+    try:
+        lat, lon = float(element.get("lat")), float(element.get("lon"))
+        ele = _child_text(element, "ele")
+        point = (lon, lat, float(ele)) if ele else (lon, lat)
+    except (TypeError, ValueError):
+        raise TrailError("the GPX file has a point with invalid coordinates") from None
+    if not (-180 <= lon <= 180 and -90 <= lat <= 90):
+        raise TrailError(f"the GPX file has a point out of range: lat={lat}, lon={lon}")
+    return point
+
+
+def parse_gpx(data: bytes) -> dict:
+    """Extract tracks/routes (as line parts), waypoints and a name from a GPX file.
+
+    Timestamps and any other per-point data besides elevation are dropped.
+    """
+    if b"<!DOCTYPE" in data or b"<!ENTITY" in data:
+        raise TrailError("GPX files with a DOCTYPE are not supported")
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError as exc:
+        raise TrailError(f"not a valid GPX file: {exc}") from None
+    if _local(root.tag) != "gpx":
+        raise TrailError("not a GPX file (no <gpx> root element)")
+
+    parts, names = [], []
+    for trk in _children(root, "trk"):
+        names.append(_child_text(trk, "name"))
+        for segment in _children(trk, "trkseg"):
+            parts.append([_gpx_point(p) for p in _children(segment, "trkpt")])
+    for rte in _children(root, "rte"):
+        names.append(_child_text(rte, "name"))
+        parts.append([_gpx_point(p) for p in _children(rte, "rtept")])
+    parts = [part for part in parts if len(part) >= 2]
+    if not parts:
+        raise TrailError("the GPX file has no track or route with at least two points")
+    if not all(len(pt) == 3 for part in parts for pt in part):
+        parts = [[pt[:2] for pt in part] for part in parts]  # elevation only if every point has it
+
+    waypoints = []
+    for wpt in _children(root, "wpt"):
+        point = _gpx_point(wpt)
+        waypoints.append({
+            "name": _child_text(wpt, "name"),
+            "type": _child_text(wpt, "type") or _child_text(wpt, "sym") or None,
+            "lon": point[0],
+            "lat": point[1],
+            "ele": point[2] if len(point) > 2 else None,
+        })
+
+    metadata = _children(root, "metadata")
+    name = next((n for n in names if n), "") or (_child_text(metadata[0], "name") if metadata else "")
+    return {"name": name, "loop": False, "difficulty": None, "parts": parts, "waypoints": waypoints}
+
+
+# --------------------------------------------------------------------------
 # Statistics and GeoJSON
 # --------------------------------------------------------------------------
 
@@ -312,8 +393,8 @@ def build_feature_collection(page: dict, source: dict, name: str, imported: str)
     properties = {
         "kind": "track",
         "name": name,
-        "source_url": source["url"],
-        "activity": source["activity"],
+        "source_url": source.get("url"),
+        "activity": source.get("activity"),
         "difficulty": page["difficulty"],
         **stats,
         "loop": page["loop"] or haversine_m(parts[0][0], parts[-1][-1]) < LOOP_MAX_GAP_M,
@@ -449,9 +530,31 @@ def import_trail(url: str, *, trail_id: str | None = None, name: str | None = No
     if keep_name and name is None:
         name = load_track_properties(trail_id).get("name")
     page = parse_page(page_html if page_html is not None else fetch_page(source["url"]))
-    collection = build_feature_collection(page, source, name or page["name"] or trail_id,
-                                          dt.date.today().isoformat())
-    write_json(path, collection)
+    return save_trail(trail_id, page, source, name or page["name"] or trail_id, status)
+
+
+def import_file(file: str, *, trail_id: str | None = None, name: str | None = None,
+                force: bool = False, status: str | None = None) -> str:
+    """Import a GPX file, e.g. a route drawn on gpx.studio or a track recorded on the phone."""
+    path = Path(file).expanduser()
+    if path.suffix.lower() != ".gpx":
+        raise TrailError(f"{file}: expected a Wikiloc URL or a .gpx file")
+    if not path.is_file():
+        raise TrailError(f"no such file: {file}")
+    trail_id = trail_id or slugify(path.stem)
+    if not ID_RE.match(trail_id):
+        raise TrailError(f"invalid trail id '{trail_id}'; choose one with --id")
+    if trail_path(trail_id).exists() and not force:
+        raise TrailError(f"trails/{trail_id}.geojson already exists; choose another id with --id, "
+                         "or pass --force to replace it")
+    page = parse_gpx(path.read_bytes())
+    return save_trail(trail_id, page, {}, name or page["name"] or path.stem, status)
+
+
+def save_trail(trail_id: str, page: dict, source: dict, name: str, status: str | None) -> str:
+    """Write the trail file and its index entry; print a one-line summary."""
+    collection = build_feature_collection(page, source, name, dt.date.today().isoformat())
+    write_json(trail_path(trail_id), collection)
 
     index = load_index()
     if status:
@@ -468,17 +571,26 @@ def import_trail(url: str, *, trail_id: str | None = None, name: str | None = No
     return trail_id
 
 
+def _is_url(text: str) -> bool:
+    return text.startswith(("http://", "https://"))
+
+
 def cmd_import(args) -> int:
-    if len(args.urls) > 1 and (args.id or args.name or args.html):
-        raise TrailError("--id, --name and --html work with a single URL only")
+    if len(args.sources) > 1 and (args.id or args.name or args.html):
+        raise TrailError("--id, --name and --html work with a single URL or file only")
+    if args.html and not _is_url(args.sources[0]):
+        raise TrailError("--html goes with a Wikiloc URL, not a GPX file")
     page_html = Path(args.html).read_text(encoding="utf-8", errors="replace") if args.html else None
     failed = 0
-    for url in args.urls:
+    for source in args.sources:
         try:
-            import_trail(url, trail_id=args.id, name=args.name, page_html=page_html, force=args.force,
-                         status=args.status)
+            if _is_url(source):
+                import_trail(source, trail_id=args.id, name=args.name, page_html=page_html,
+                             force=args.force, status=args.status)
+            else:
+                import_file(source, trail_id=args.id, name=args.name, force=args.force, status=args.status)
         except TrailError as exc:
-            print(f"error: {url}: {exc}", file=sys.stderr)
+            print(f"error: {source}: {exc}", file=sys.stderr)
             failed += 1
     return 1 if failed else 0
 
@@ -491,9 +603,14 @@ def cmd_refresh(args) -> int:
     failed = 0
     for trail_id in ids:
         try:
-            url = load_track_properties(trail_id).get("source_url")
+            props = load_track_properties(trail_id)
+            if not props:
+                raise TrailError("no such trail file")
+            url = props.get("source_url")
             if not url:
-                raise TrailError("no trail file with a source_url")
+                print(f"{trail_id}: skipped, imported from a file "
+                      f"(re-import it with `import FILE --id {trail_id} --force`)")
+                continue
             import_trail(url, trail_id=trail_id, force=True, keep_name=True)
         except TrailError as exc:
             print(f"error: {trail_id}: {exc}", file=sys.stderr)
@@ -587,10 +704,11 @@ def validate_trail_file(path: Path) -> list[str]:
                 errors.append(f"{where}: track needs a LineString/MultiLineString of [lon, lat, ele] points")
             if not isinstance(props.get("name"), str) or not props["name"].strip():
                 errors.append(f"{where}: track has no name")
-            try:
-                parse_wikiloc_url(props.get("source_url") or "")
-            except TrailError:
-                errors.append(f"{where}: missing or invalid source_url")
+            if "source_url" in props:  # absent for trails imported from a GPX file
+                try:
+                    parse_wikiloc_url(str(props["source_url"]))
+                except TrailError:
+                    errors.append(f"{where}: invalid source_url")
         elif props.get("kind") == "waypoint":
             if gtype != "Point" or not _is_lonlat(coords):
                 errors.append(f"{where}: waypoint needs a Point geometry")
@@ -624,9 +742,10 @@ def cmd_check(args) -> int:
     for trail_id in sorted(files):
         file_errors = validate_trail_file(trail_path(trail_id))
         errors.extend(file_errors)
-        if file_errors:
+        url = load_track_properties(trail_id).get("source_url")
+        if file_errors or not url:
             continue
-        num = parse_wikiloc_url(load_track_properties(trail_id)["source_url"])["num"]
+        num = parse_wikiloc_url(url)["num"]
         if num in seen:
             errors.append(f"'{trail_id}' and '{seen[num]}' are imported from the same Wikiloc trail")
         seen.setdefault(num, trail_id)
@@ -642,10 +761,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Manage the trails shown on the Cyprus Trails map.")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("import", help="import trails from Wikiloc URLs")
-    p.add_argument("urls", nargs="+", metavar="URL")
-    p.add_argument("--id", help="trail id / file name (default: the URL slug)")
-    p.add_argument("--name", help="display name (default: the name on Wikiloc)")
+    p = sub.add_parser("import", help="import trails from Wikiloc URLs or GPX files")
+    p.add_argument("sources", nargs="+", metavar="URL|FILE.gpx")
+    p.add_argument("--id", help="trail id / file name (default: the URL slug or the GPX file name)")
+    p.add_argument("--name", help="display name (default: the name on Wikiloc or in the GPX file)")
     p.add_argument("--html", metavar="FILE", help="read a page saved from the browser instead of downloading it")
     p.add_argument("--force", action="store_true", help="overwrite an existing trail file")
     p.add_argument("--status", choices=STATUSES, help="set the status (default: todo for new trails)")

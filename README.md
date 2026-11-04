@@ -48,12 +48,17 @@ python3 tools/trails.py import https://www.wikiloc.com/hiking-trails/dipotamos-r
 # If Wikiloc refuses the download, save the page from a browser and import the file:
 python3 tools/trails.py import URL --html saved-page.html
 
+# Own routes: draw one on https://gpx.studio (it snaps to paths and adds elevation),
+# export it as GPX and import the file. Recorded tracks (OsmAnd, Strava, …) work the same way.
+# The id defaults to the file name; gpx.studio names files "New file 1", so pass --name.
+python3 tools/trails.py import ~/Downloads/route_01.gpx --name "Akamas ridge"
+
 # Mark progress
 python3 tools/trails.py mark dipotamos-reservoir done
 python3 tools/trails.py mark dipotamos-reservoir todo
 
 python3 tools/trails.py list            # status, km and ascent of every trail
-python3 tools/trails.py refresh --all   # re-import from the saved links, keeping names and status
+python3 tools/trails.py refresh --all   # re-import Wikiloc trails from the saved links, keeping names and status
 python3 tools/trails.py remove ID       # delete a trail
 python3 tools/trails.py check           # validate the data before committing
 ```
@@ -70,9 +75,9 @@ Run the tests with `python3 tools/test_trails.py`.
   hand (then run `trails.py check`).
 - `trails/<id>.geojson` holds one trail as a GeoJSON `FeatureCollection`: one
   `track` feature (a `LineString` of `[lon, lat, elevation]` points with name,
-  `source_url`, distance, ascent/descent, elevation range, difficulty, loop flag
-  and trail type) plus one `waypoint` feature per waypoint. GitHub previews these
-  files on a map.
+  distance, ascent/descent, elevation range and loop flag; Wikiloc trails also
+  have `source_url`, difficulty and trail type) plus one `waypoint` feature per
+  waypoint. GitHub previews these files on a map.
 
 ### Import
 
@@ -90,6 +95,12 @@ has no such figures does `trails.py` estimate them itself, from the elevation
 averaged over 50 m of track and counted with a 3 m hysteresis.
 
 Photos, descriptions and author details are not copied.
+
+A GPX file is read with the standard-library XML parser (files with a DOCTYPE are
+refused): every track segment and route becomes a line, `<wpt>` elements become
+waypoints, and timestamps are dropped. Its ascent/descent is always estimated as
+above; routes from gpx.studio carry elevation from a terrain model, which is
+smooth, so the estimate is accurate.
 
 ### Map
 
@@ -109,10 +120,11 @@ local equirectangular projection around the current position.
 
 ## Data
 
-Trail tracks, names and waypoints are imported from public trails on
-[Wikiloc](https://www.wikiloc.com/); each trail file and popup links to its
-original. The track data is **not** covered by this repository's license; its
-copyright remains with the respective authors.
+Most trail tracks, names and waypoints are imported from public trails on
+[Wikiloc](https://www.wikiloc.com/); each such trail file and popup links to its
+original. That track data is **not** covered by this repository's license; its
+copyright remains with the respective authors. Trails without a Wikiloc link
+were drawn by me.
 
 This is a personal tool with no warranty. Trails change, GPS tracks can be
 inaccurate — check conditions on the ground.

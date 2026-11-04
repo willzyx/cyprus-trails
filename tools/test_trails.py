@@ -212,5 +212,57 @@ class JsonFormatTest(unittest.TestCase):
         self.assertEqual(trails.to_json({"x": {"status": "todo"}}), '{\n  "x": {"status": "todo"}\n}\n')
 
 
+GPX = b"""<?xml version="1.0" encoding="UTF-8"?>
+<gpx creator="https://gpx.studio" version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
+  <metadata><name>File name</name></metadata>
+  <wpt lat="35.0" lon="32.3"><ele>40</ele><name>Spring</name><sym>Water</sym></wpt>
+  <trk>
+    <name>Akamas ridge</name>
+    <trkseg>
+      <trkpt lat="35.05683" lon="32.345765"><ele>32.62</ele><time>2026-11-05T08:00:00Z</time></trkpt>
+      <trkpt lat="35.056842" lon="32.34576"><ele>32.81</ele></trkpt>
+      <trkpt lat="35.0569" lon="32.3456"><ele>40.5</ele></trkpt>
+    </trkseg>
+  </trk>
+</gpx>"""
+
+
+class GpxTest(unittest.TestCase):
+    def test_track_waypoints_and_name(self):
+        page = trails.parse_gpx(GPX)
+        self.assertEqual(page["name"], "Akamas ridge")
+        self.assertEqual(page["parts"], [[(32.345765, 35.05683, 32.62), (32.34576, 35.056842, 32.81),
+                                          (32.3456, 35.0569, 40.5)]])
+        self.assertEqual(page["waypoints"], [
+            {"name": "Spring", "type": "Water", "lon": 32.3, "lat": 35.0, "ele": 40.0}])
+
+    def test_route_points_without_elevation(self):
+        data = (b'<gpx xmlns="http://www.topografix.com/GPX/1/0"><rte>'
+                b'<rtept lat="35.0" lon="33.0"><ele>10</ele></rtept><rtept lat="35.1" lon="33.1"/></rte></gpx>')
+        page = trails.parse_gpx(data)
+        self.assertEqual(page["parts"], [[(33.0, 35.0), (33.1, 35.1)]])  # elevation dropped: not on every point
+        self.assertEqual(page["name"], "")
+
+    def test_feature_collection_has_no_source_url(self):
+        page = trails.parse_gpx(GPX)
+        fc = trails.build_feature_collection(page, {}, page["name"], "2026-11-05")
+        props = fc["features"][0]["properties"]
+        self.assertNotIn("source_url", props)
+        self.assertNotIn("time", json.dumps(fc))
+        self.assertEqual(props["name"], "Akamas ridge")
+
+    def test_rejects_doctype_and_non_gpx(self):
+        with self.assertRaises(trails.TrailError):
+            trails.parse_gpx(b'<!DOCTYPE gpx [<!ENTITY a "aaaa">]><gpx/>')
+        with self.assertRaises(trails.TrailError):
+            trails.parse_gpx(b"<kml/>")
+        with self.assertRaises(trails.TrailError):
+            trails.parse_gpx(b"<gpx><trk><trkseg><trkpt lat='x' lon='1'/></trkseg></trk></gpx>")
+
+    def test_slugify(self):
+        self.assertEqual(trails.slugify("route_01"), "route-01")
+        self.assertEqual(trails.slugify("Ágios Theódoros — Asínou!"), "agios-theodoros-asinou")
+
+
 if __name__ == "__main__":
     unittest.main()
