@@ -280,9 +280,14 @@
       if (p.difficulty) more.push(escapeHtml(p.difficulty));
       more.push(p.trail_type ? escapeHtml(p.trail_type) : p.loop ? 'Loop' : 'One way');
       html += '<span class="muted">' + more.join(' · ') + '</span><br>';
+      var links = [];
+      var start = t.latlngs[0][0];
+      links.push('<a href="https://www.google.com/maps/search/?api=1&amp;query=' +
+        start[0].toFixed(6) + ',' + start[1].toFixed(6) + '" target="_blank" rel="noopener">Start on Google Maps ↗</a>');
       if (isWikilocUrl(p.source_url)) {
-        html += '<a href="' + escapeHtml(p.source_url) + '" target="_blank" rel="noopener">Open on Wikiloc ↗</a><br>';
+        links.push('<a href="' + escapeHtml(p.source_url) + '" target="_blank" rel="noopener">Wikiloc ↗</a>');
       }
+      html += links.join(' · ') + '<br>';
       html += '<code>' + escapeHtml(t.id) + '</code>';
       return html;
     }

@@ -14,7 +14,8 @@ glance whether I am on a known trail and which areas I have already covered.
   planned trail overlaps one already walked, the shared part shows as covered.
 - A thin centerline on every band for following the exact track.
 - Popup per trail with distance, ascent/descent, elevation range, difficulty,
-  trail type (loop, one way, out and back) and a link to the original on Wikiloc.
+  trail type (loop, one way, out and back), a Google Maps link to the start of the
+  trail (handy for driving there) and a link to the original on Wikiloc.
 - Waypoints from the original trail, shown from zoom 14.
 - Live geolocation via `watchPosition`, with an accuracy circle. The bottom panel
   shows the totals (trails and km done) and the nearest trail: "On trail" when
