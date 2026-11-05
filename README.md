@@ -53,6 +53,11 @@ python3 tools/trails.py import URL --html saved-page.html
 # The id defaults to the file name; gpx.studio names files "New file 1", so pass --name.
 python3 tools/trails.py import ~/Downloads/route_01.gpx --name "Akamas ridge"
 
+# Redraw just a piece of a trail: draw it from one point of the trail to another (each end
+# within 50 m of the trail, either direction) and splice it in place of that stretch.
+# Re-importing the original GPX with --force would undo the patch.
+python3 tools/trails.py patch akamas-traverse ~/Downloads/route_01_patch.gpx
+
 # Mark progress
 python3 tools/trails.py mark dipotamos-reservoir done
 python3 tools/trails.py mark dipotamos-reservoir todo

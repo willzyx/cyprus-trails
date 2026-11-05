@@ -264,5 +264,49 @@ class GpxTest(unittest.TestCase):
         self.assertEqual(trails.slugify("Ágios Theódoros — Asínou!"), "agios-theodoros-asinou")
 
 
+class SpliceTest(unittest.TestCase):
+    STEP = 1e-4  # ~11 m of latitude
+
+    def line(self, start, end, lon=33.0):
+        step = self.STEP if end > start else -self.STEP
+        return [(lon, 35.0 + i * self.STEP, 100.0) for i in range(start, end + (1 if step > 0 else -1),
+                                                                    1 if step > 0 else -1)]
+
+    def test_replaces_the_middle(self):
+        route = self.line(0, 100)
+        detour = [(33.0, 35.0 + 30 * self.STEP, 100.0), (33.0005, 35.0 + 45 * self.STEP, 100.0),
+                  (33.0, 35.0 + 60 * self.STEP, 100.0)]
+        new, i, j = trails.splice(route, detour)
+        self.assertEqual((i, j), (30, 60))
+        self.assertEqual(new[:30], route[:30])
+        self.assertEqual(new[30:33], detour)
+        self.assertEqual(new[33:], route[61:])
+
+    def test_patch_drawn_backwards_is_reversed(self):
+        route = self.line(0, 100)
+        detour = [(33.0, 35.0 + 60 * self.STEP, 100.0), (33.0005, 35.0 + 45 * self.STEP, 100.0),
+                  (33.0, 35.0 + 30 * self.STEP, 100.0)]
+        new, i, j = trails.splice(route, detour)
+        self.assertEqual((i, j), (30, 60))
+        self.assertEqual(new[30:33], detour[::-1])
+
+    def test_out_and_back_picks_the_leg_that_fits(self):
+        out = self.line(0, 100)
+        back = self.line(100, 0, lon=33.0001)  # return leg ~9 m east of the way out
+        route = out + back
+        # a short patch between two points 20 steps apart: on either leg the stretch is ~220 m,
+        # but pairing one point on the way out with one on the way back would cover ~1.3 km
+        patch = [(33.0, 35.0 + 40 * self.STEP, 100.0), (33.0, 35.0 + 60 * self.STEP, 100.0)]
+        _, i, j = trails.splice(route, patch)
+        self.assertTrue((i < 101) == (j < 101), (i, j))  # both ends on the same leg
+        self.assertAlmostEqual(abs(j - i), 20, delta=1)
+
+    def test_patch_too_far_from_the_trail(self):
+        route = self.line(0, 100)
+        patch = [(33.01, 35.0, 100.0), (33.0, 35.005, 100.0)]  # ~900 m east of the start
+        with self.assertRaises(trails.TrailError):
+            trails.splice(route, patch)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,7 @@ Uses the Python standard library only.
 
     python3 tools/trails.py import URL|FILE.gpx [...] [--id ID] [--name NAME] [--html FILE] [--force] [--status done|todo]
     python3 tools/trails.py refresh ID [ID ...] | --all
+    python3 tools/trails.py patch ID FILE.gpx [--max-gap METRES]
     python3 tools/trails.py mark ID done|todo
     python3 tools/trails.py list
     python3 tools/trails.py remove ID
@@ -42,6 +43,7 @@ EARTH_RADIUS_M = 6371008.8
 ELE_SMOOTHING_M = 50.0     # elevation is averaged over this stretch of track before ascent/descent...
 ASCENT_THRESHOLD_M = 3.0   # ...and counted with this hysteresis, so GPS elevation noise does not add up
 LOOP_MAX_GAP_M = 200.0     # start and end closer than this => loop
+BAND_RADIUS_M = 50.0       # half-width of a trail's band on the map; also the default patch tolerance
 JSON_WIDTH = 120           # containers shorter than this are written on one line
 STATUSES = ("done", "todo")
 
@@ -618,6 +620,93 @@ def cmd_refresh(args) -> int:
     return 1 if failed else 0
 
 
+def _line_length_m(points: list) -> float:
+    return sum(haversine_m(points[i], points[i + 1]) for i in range(len(points) - 1))
+
+
+def splice(route: list, patch: list, max_gap_m: float = BAND_RADIUS_M) -> tuple[list, int, int]:
+    """Replace the stretch of ``route`` between the patch's two ends with ``patch``.
+
+    Each end of the patch joins the nearest route point within ``max_gap_m``. When the route
+    passes that place more than once (an out-and-back trail), the passes whose stretch of
+    route is closest in length to the patch win. The patch may be drawn in either direction.
+    Returns the new route and the indices of the replaced stretch.
+    """
+    cum = [0.0]
+    for i in range(1, len(route)):
+        cum.append(cum[-1] + haversine_m(route[i - 1], route[i]))
+
+    def candidates(point, label):
+        """The nearest route point of every separate pass of the route near ``point``."""
+        dist = [haversine_m(point, q) for q in route]
+        near = [i for i, d in enumerate(dist) if d <= max_gap_m]
+        if not near:
+            raise TrailError(f"the patch {label} is {min(dist):.0f} m from the trail "
+                             f"(at most {max_gap_m:.0f} m allowed)")
+        passes = [[near[0]]]
+        for i in near[1:]:
+            if i == passes[-1][-1] + 1:
+                passes[-1].append(i)
+            else:
+                passes.append([i])
+        return [min(p, key=lambda i: dist[i]) for p in passes]
+
+    patch_len = _line_length_m(patch)
+    starts, ends = candidates(patch[0], "start"), candidates(patch[-1], "end")
+    pairs = [(abs(abs(cum[j] - cum[i]) - patch_len), i, j) for i in starts for j in ends if i != j]
+    if not pairs:
+        raise TrailError("the patch starts and ends at the same point of the trail")
+    _, i_start, i_end = min(pairs)
+    if i_start > i_end:
+        patch, i_start, i_end = patch[::-1], i_end, i_start
+    return route[:i_start] + patch + route[i_end + 1:], i_start, i_end
+
+
+def cmd_patch(args) -> int:
+    path = trail_path(args.id)
+    if not path.exists():
+        raise TrailError(f"unknown trail '{args.id}' (see `trails.py list`)")
+    collection = read_json(path)
+    track = track_feature(collection)
+    if not track or (track.get("geometry") or {}).get("type") != "LineString":
+        raise TrailError("only a trail made of a single line can be patched")
+    route = [tuple(c) for c in track["geometry"]["coordinates"]]
+
+    file = Path(args.file).expanduser()
+    if not file.is_file():
+        raise TrailError(f"no such file: {args.file}")
+    patch_parts = parse_gpx(file.read_bytes())["parts"]
+    if len(patch_parts) != 1:
+        raise TrailError("the patch file must contain exactly one track or route")
+    patch = patch_parts[0]
+    if len(patch[0]) != len(route[0]):
+        raise TrailError("the patch and the trail must both have elevation, or both not")
+
+    new_route, i_start, i_end = splice(route, patch, args.max_gap)
+    old_km = _line_length_m(route[i_start:i_end + 1]) / 1000
+    track["geometry"]["coordinates"] = [_coord(p) for p in new_route]
+
+    props = track["properties"]
+    stats = track_stats([new_route])
+    if i_start == 0 or i_end == len(route) - 1:  # an end of the trail moved
+        stats["loop"] = haversine_m(new_route[0], new_route[-1]) < LOOP_MAX_GAP_M
+    for key in ("ascent_m", "descent_m", "ele_min_m", "ele_max_m"):
+        if key not in stats:
+            props.pop(key, None)
+    updated = {key: stats.get(key, value) for key, value in props.items()}
+    updated.update({key: value for key, value in stats.items() if key not in updated})
+    track["properties"] = updated
+    write_json(path, collection)
+
+    climb = f", ↑{updated['ascent_m']} m ↓{updated['descent_m']} m" if "ascent_m" in updated else ""
+    print(f"{args.id}: replaced {old_km:.2f} km ({i_end - i_start + 1} points) with "
+          f"{_line_length_m(patch) / 1000:.2f} km ({len(patch)} points); "
+          f"now {updated['distance_km']} km{climb}")
+    if updated.get("source_url"):
+        print("note: ascent/descent are now estimated; `refresh` would bring back the Wikiloc track")
+    return 0
+
+
 def cmd_mark(args) -> int:
     index = load_index()
     if args.id not in index:
@@ -774,6 +863,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("ids", nargs="*", metavar="ID")
     p.add_argument("--all", action="store_true", help="refresh every trail")
     p.set_defaults(func=cmd_refresh)
+
+    p = sub.add_parser("patch", help="replace a stretch of a trail with a redrawn piece from a GPX file")
+    p.add_argument("id")
+    p.add_argument("file", metavar="FILE.gpx")
+    p.add_argument("--max-gap", type=float, default=BAND_RADIUS_M, metavar="METRES",
+                   help=f"how far each end of the patch may be from the trail (default: {BAND_RADIUS_M:.0f})")
+    p.set_defaults(func=cmd_patch)
 
     p = sub.add_parser("mark", help="mark a trail as done or todo")
     p.add_argument("id")
