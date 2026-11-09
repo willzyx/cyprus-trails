@@ -53,6 +53,7 @@
     }
     .swatch.done { background: #7b1fa2; }
     .swatch.todo { background: #ef6c00; }
+    .swatch.elevation { width: 24px; }
 
     #locate-btn {
       position: absolute;
@@ -114,6 +115,12 @@
     var BAND_RADIUS_M = 50;          // each trail is drawn as a band of ±50 m around the track
     var BAND_MIN_PX = 4;             // keep bands visible when zoomed out
     var BAND_OPACITY = 0.45;
+    // Inside each band a narrower band shows the elevation relative to that trail's own range.
+    var ELEVATION_BAND_RADIUS_M = 25;
+    var ELEVATION_MIN_ZOOM = 14;     // below this the bands are too narrow to show both
+    var ELEVATION_STEPS = 12;        // color levels per trail
+    var ELEVATION_SMOOTHING_M = 50;  // same averaging window as tools/trails.py
+    var ELEVATION_PALETTE = ['#1565c0', '#039be5', '#43a047', '#fdd835', '#fb8c00', '#c62828'];  // low → high
     var WAYPOINT_MIN_ZOOM = 14;
     var FOLLOW_ZOOM = 15;
     var EARTH_CIRCUMFERENCE_M = 40075016.686;
@@ -214,9 +221,93 @@
       return Math.max(BAND_MIN_PX, 2 * BAND_RADIUS_M / metersPerPixel());
     }
 
+    function elevationBandStyle() {
+      return {
+        weight: 2 * ELEVATION_BAND_RADIUS_M / metersPerPixel(),
+        opacity: map.getZoom() >= ELEVATION_MIN_ZOOM ? 1 : 0
+      };
+    }
+
     function updateBandWidths() {
       var weight = bandWeight();
-      trails.forEach(function (t) { t.band.setStyle({ weight: weight }); });
+      var inner = elevationBandStyle();
+      trails.forEach(function (t) {
+        t.band.setStyle({ weight: weight });
+        t.elevationBands.forEach(function (b) { b.setStyle(inner); });
+      });
+    }
+
+    // ---- Elevation colors ------------------------------------------------------------
+
+    function hexToRgb(hex) {
+      var n = parseInt(hex.slice(1), 16);
+      return [n >> 16, (n >> 8) & 255, n & 255];
+    }
+
+    // ELEVATION_STEPS colors spread evenly over the palette, the first and last exactly at its ends.
+    var ELEVATION_COLORS = (function () {
+      var stops = ELEVATION_PALETTE.map(hexToRgb);
+      var colors = [];
+      for (var k = 0; k < ELEVATION_STEPS; k++) {
+        var x = k / (ELEVATION_STEPS - 1) * (stops.length - 1);
+        var i = Math.min(Math.floor(x), stops.length - 2);
+        var f = x - i;
+        colors.push('rgb(' + [0, 1, 2].map(function (j) {
+          return Math.round(stops[i][j] + (stops[i + 1][j] - stops[i][j]) * f);
+        }).join(',') + ')');
+      }
+      return colors;
+    })();
+    var ELEVATION_SWATCH = '<span class="swatch elevation" style="background: linear-gradient(90deg, ' +
+      ELEVATION_PALETTE.join(', ') + ')"></span>';
+
+    // Moving average of elevation over ELEVATION_SMOOTHING_M of track centred on each point,
+    // a port of smoothed_elevations() in tools/trails.py. coords are GeoJSON [lon, lat, ele].
+    function smoothedElevations(coords) {
+      var half = ELEVATION_SMOOTHING_M / 2;
+      var cum = [0];
+      var prefix = [0];
+      coords.forEach(function (c, i) {
+        if (i) cum.push(cum[i - 1] + L.latLng(coords[i - 1][1], coords[i - 1][0]).distanceTo([c[1], c[0]]));
+        prefix.push(prefix[i] + c[2]);
+      });
+      var result = [];
+      var lo = 0, hi = 0;
+      for (var i = 0; i < coords.length; i++) {
+        while (cum[i] - cum[lo] > half) lo++;
+        while (hi + 1 < coords.length && cum[hi + 1] - cum[i] <= half) hi++;
+        result.push((prefix[hi + 1] - prefix[lo]) / (hi + 1 - lo));
+      }
+      return result;
+    }
+
+    // Splits the track into runs of consecutive segments that fall into the same color level,
+    // from the trail's lowest point (level 0) to its highest. levels[k] is a list of runs.
+    function elevationLevels(t) {
+      var lo = Infinity, hi = -Infinity;
+      t.elevations.forEach(function (ele) {
+        ele.forEach(function (e) { lo = Math.min(lo, e); hi = Math.max(hi, e); });
+      });
+      var span = hi - lo;
+      var levels = [];
+      t.latlngs.forEach(function (line, li) {
+        var ele = t.elevations[li];
+        var run = null;
+        var runLevel = -1;
+        for (var i = 1; i < line.length; i++) {
+          var mid = (ele[i - 1] + ele[i]) / 2;
+          var k = span > 0
+            ? Math.min(ELEVATION_STEPS - 1, Math.floor((mid - lo) / span * ELEVATION_STEPS))
+            : Math.floor(ELEVATION_STEPS / 2);
+          if (k !== runLevel) {
+            run = [line[i - 1]];
+            (levels[k] = levels[k] || []).push(run);
+            runLevel = k;
+          }
+          run.push(line[i]);
+        }
+      });
+      return levels;
     }
 
     function keepDoneOnTop() {
@@ -255,6 +346,9 @@
       var g = track.geometry;
       var lines = g.type === 'LineString' ? [g.coordinates] : g.type === 'MultiLineString' ? g.coordinates : null;
       if (!lines) throw new Error('unsupported geometry ' + g.type);
+      var hasElevation = lines.every(function (line) {
+        return line.every(function (c) { return typeof c[2] === 'number' && isFinite(c[2]); });
+      });
       return {
         id: id,
         status: entry && entry.status === 'done' ? 'done' : 'todo',
@@ -262,6 +356,7 @@
         latlngs: lines.map(function (line) {
           return line.map(function (c) { return [c[1], c[0]]; });
         }),
+        elevations: hasElevation ? lines.map(smoothedElevations) : null,
         waypoints: waypoints
       };
     }
@@ -276,7 +371,10 @@
       if (p.ascent_m != null) facts.push('↑ ' + escapeHtml(p.ascent_m) + ' m', '↓ ' + escapeHtml(p.descent_m) + ' m');
       if (facts.length) html += facts.join(' · ') + '<br>';
       var more = [];
-      if (p.ele_min_m != null) more.push('Elevation ' + Math.round(p.ele_min_m) + '–' + Math.round(p.ele_max_m) + ' m');
+      if (p.ele_min_m != null) {
+        more.push((t.elevations ? ELEVATION_SWATCH : '') +
+          'Elevation ' + Math.round(p.ele_min_m) + '–' + Math.round(p.ele_max_m) + ' m');
+      }
       if (p.difficulty) more.push(escapeHtml(p.difficulty));
       more.push(p.trail_type ? escapeHtml(p.trail_type) : p.loop ? 'Loop' : 'One way');
       html += '<span class="muted">' + more.join(' · ') + '</span><br>';
@@ -292,17 +390,33 @@
       return html;
     }
 
-    function renderTrail(t) {
-      var style = STYLE[t.status];
-      t.band = L.polyline(t.latlngs, {
+    function bandPath(t, latlngs, style) {
+      return L.polyline(latlngs, L.extend({
         pane: 'bands',
-        color: style.band,
         opacity: 1,
-        weight: bandWeight(),
         lineCap: 'round',
         lineJoin: 'round',
         noClip: true   // a clipped wide stroke would end abruptly near the screen edge
-      }).bindPopup(function () { return popupHtml(t); }, { maxWidth: 280 });
+      }, style)).bindPopup(function () { return popupHtml(t); }, { maxWidth: 280 });
+    }
+
+    function renderTrail(t) {
+      var style = STYLE[t.status];
+      t.band = bandPath(t, t.latlngs, { color: style.band, weight: bandWeight() });
+      groups[t.status].addLayer(t.band);
+      // One multi-polyline per color level, drawn over the band; the bands pane is opaque
+      // inside, so the middle shows the elevation color and the edges the status color.
+      t.elevationBands = [];
+      if (t.elevations) {
+        var levels = elevationLevels(t);
+        var inner = elevationBandStyle();
+        for (var k = 0; k < ELEVATION_STEPS; k++) {
+          if (!levels[k]) continue;
+          var band = bandPath(t, levels[k], L.extend({ color: ELEVATION_COLORS[k] }, inner));
+          t.elevationBands.push(band);
+          groups[t.status].addLayer(band);
+        }
+      }
       t.line = L.polyline(t.latlngs, {
         pane: 'centerlines',
         color: style.line,
@@ -310,7 +424,7 @@
         weight: 2,
         interactive: false
       });
-      groups[t.status].addLayer(t.band).addLayer(t.line);
+      groups[t.status].addLayer(t.line);
 
       t.waypoints.forEach(function (wp) {
         var c = wp.geometry.coordinates;
@@ -346,7 +460,8 @@
       summaryEl.innerHTML =
         '<span class="swatch done"></span>Done <b>' + count.done + '</b> / ' + total + ' trails · ' +
         '<b>' + formatKm(km.done) + '</b> / ' + formatKm(km.done + km.todo) + ' km<br>' +
-        '<span class="hint"><span class="swatch todo"></span>Not done · bands are ±' + BAND_RADIUS_M + ' m around the track</span>';
+        '<span class="hint"><span class="swatch todo"></span>Not done · ' + ELEVATION_SWATCH +
+        'elevation · bands ±' + BAND_RADIUS_M + ' m</span>';
     }
 
     // ---- Location ----------------------------------------------------------------

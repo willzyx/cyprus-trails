@@ -12,6 +12,9 @@ glance whether I am on a known trail and which areas I have already covered.
 - Trails drawn as ±50 m bands whose width is true to scale at every zoom level,
   purple for done and orange for not done yet. Done bands sit on top, so where a
   planned trail overlaps one already walked, the shared part shows as covered.
+- From zoom 14, the middle of every band (±25 m) shows the elevation relative to
+  that trail's own range: blue at its lowest point, red at its highest, so climbs
+  and summits stand out while the edges keep the done / not done color.
 - A thin centerline on every band for following the exact track.
 - Popup per trail with distance, ascent/descent, elevation range, difficulty,
   trail type (loop, one way, out and back), a Google Maps link to the start of the
@@ -120,6 +123,14 @@ latitude, recomputed after every zoom). Such a stroke has exactly the shape of a
 50 m buffer around the line, and Web Mercator is conformal, so the band is true
 to scale without computing any polygons. Bands are drawn opaque inside a
 semi-transparent map pane, so overlapping bands do not darken each other.
+
+Leaflet cannot draw a gradient along a line, so the elevation band is split into
+12 color levels between the trail's lowest and highest point. Elevation is first
+averaged over 50 m of track, as in `trails.py`, so GPS noise does not speckle the
+colors. Each level is one multi-polyline of all the stretches that fall into it,
+so a trail adds at most 12 paths. They sit in the same opaque-inside pane on top
+of the status band: the middle shows the pure elevation color, the edges the pure
+status color.
 
 The distance to the nearest trail is the minimum point-to-segment distance in a
 local equirectangular projection around the current position.
