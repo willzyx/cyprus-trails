@@ -95,6 +95,9 @@
       white-space: normal;
       font-size: 11px;
     }
+
+    /* The panel covers the bottom edge, so the scale bar sits above it, level with the locate button. */
+    .leaflet-bottom.leaflet-left { left: 7px; bottom: 125px; }
   </style>
 </head>
 <body>
@@ -111,6 +114,9 @@
     'use strict';
 
     var CYPRUS_CENTER = [35.05, 33.2];
+    // Cyprus with enough sea around it to fill a phone screen at MIN_ZOOM; the map cannot leave this box.
+    var MAX_BOUNDS = L.latLngBounds([32.6, 30.4], [37.6, 36.0]);
+    var MIN_ZOOM = 8;
     var INDEX_URL = 'trails/index.json';
     var BAND_RADIUS_M = 50;          // each trail is drawn as a band of ±50 m around the track
     var BAND_MIN_PX = 4;             // keep bands visible when zoomed out
@@ -131,11 +137,37 @@
       todo: { band: '#ef6c00', line: '#bf360c', label: 'Not done' }
     };
 
-    var map = L.map('map', { zoomControl: true, attributionControl: false, maxZoom: 19 }).setView(CYPRUS_CENTER, 9);
+    var map = L.map('map', {
+      zoomControl: true,
+      attributionControl: false,
+      maxZoom: 19,
+      maxBounds: MAX_BOUNDS,
+      maxBoundsViscosity: 1
+    }).setView(CYPRUS_CENTER, 9);
+
+    // Never zoom out further than MAX_BOUNDS can fill the screen: with a view larger
+    // than the bounds the map would jump around while being dragged.
+    function updateMinZoom() {
+      map.setMinZoom(Math.max(MIN_ZOOM, map.getBoundsZoom(MAX_BOUNDS, true)));
+    }
+    updateMinZoom();
+    map.on('resize', updateMinZoom);
 
     var OSM_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+
+    function esriLayer(service, options) {
+      return L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/' + service + '/MapServer/tile/{z}/{y}/{x}', options);
+    }
+    function satelliteLayer() {
+      return esriLayer('World_Imagery', {
+        maxNativeZoom: 18,  // zoom 19 exists only in towns; elsewhere Esri serves a "no data" placeholder
+        maxZoom: 19,
+        attribution: 'Imagery &copy; Esri, Maxar, Earthstar Geographics'
+      });
+    }
+
     var baseLayers = {
-      'OpenStreetMap': L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      'OpenStreetMap': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
         maxZoom: 19,
         attribution: OSM_ATTRIBUTION
       }),
@@ -144,18 +176,13 @@
         maxZoom: 19,
         attribution: OSM_ATTRIBUTION + ', SRTM | Style: &copy; <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)'
       }),
-      'Satellite': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-        maxNativeZoom: 18,
-        maxZoom: 19,
-        attribution: 'Imagery &copy; Esri, Maxar, Earthstar Geographics'
-      })
+      'Satellite': satelliteLayer(),
+      'Hybrid': L.layerGroup([
+        satelliteLayer(),
+        esriLayer('Reference/World_Transportation', { maxZoom: 19, pane: 'labels' }),
+        esriLayer('Reference/World_Boundaries_and_Places', { maxZoom: 19, pane: 'labels' })
+      ])
     };
-    var savedBase = null;
-    try { savedBase = localStorage.getItem(BASE_LAYER_KEY); } catch (e) { /* storage unavailable */ }
-    (baseLayers[savedBase] || baseLayers.OpenStreetMap).addTo(map);
-    map.on('baselayerchange', function (e) {
-      try { localStorage.setItem(BASE_LAYER_KEY, e.name); } catch (err) { /* storage unavailable */ }
-    });
 
     // Panes, bottom to top. Bands are drawn opaque inside a semi-transparent pane, so
     // overlapping bands do not darken each other and a done band fully covers a todo one.
@@ -165,6 +192,7 @@
       pane.style.pointerEvents = 'none';  // only interactive paths take clicks
       if (opacity != null) pane.style.opacity = opacity;
     }
+    createPane('labels', 250);  // roads and place names of the hybrid base map, above the imagery
     createPane('bands', 410, BAND_OPACITY);
     createPane('centerlines', 420);
     createPane('waypoints', 430);
@@ -177,7 +205,17 @@
     overlays['<span class="swatch done"></span>' + STYLE.done.label] = groups.done;
     overlays['<span class="swatch todo"></span>' + STYLE.todo.label] = groups.todo;
     L.control.layers(baseLayers, overlays, { position: 'topright' }).addTo(map);
+    // Must exist before the first base layer is added: Leaflet never drops the attribution
+    // of a layer that was already on the map when the control was created.
     L.control.attribution({ position: 'topright', prefix: false }).addTo(map);
+    L.control.scale({ position: 'bottomleft', imperial: false }).addTo(map);
+
+    var savedBase = null;
+    try { savedBase = localStorage.getItem(BASE_LAYER_KEY); } catch (e) { /* storage unavailable */ }
+    (baseLayers[savedBase] || baseLayers.OpenStreetMap).addTo(map);
+    map.on('baselayerchange', function (e) {
+      try { localStorage.setItem(BASE_LAYER_KEY, e.name); } catch (err) { /* storage unavailable */ }
+    });
 
     var summaryEl = document.getElementById('summary');
     var gpsEl = document.getElementById('gps');
@@ -523,6 +561,15 @@
       locateBtn.classList.toggle('active', on);
     }
 
+    // The map cannot leave MAX_BOUNDS, so a position outside it is only reported in the panel.
+    function centerOnUser() {
+      if (!MAX_BOUNDS.contains(lastPosition)) {
+        setFollow(false);
+        return;
+      }
+      map.setView(lastPosition, Math.max(map.getZoom(), FOLLOW_ZOOM));
+    }
+
     function onPosition(pos) {
       var lat = pos.coords.latitude;
       var lng = pos.coords.longitude;
@@ -544,7 +591,7 @@
 
       if (centerOnNextFix) {
         centerOnNextFix = false;
-        map.setView(lastPosition, Math.max(map.getZoom(), FOLLOW_ZOOM));
+        centerOnUser();
       } else if (follow) {
         map.panTo(lastPosition);
       }
@@ -576,7 +623,7 @@
     locateBtn.addEventListener('click', function () {
       setFollow(true);
       if (lastPosition) {
-        map.setView(lastPosition, Math.max(map.getZoom(), FOLLOW_ZOOM));
+        centerOnUser();
       } else {
         centerOnNextFix = true;
         startGeolocation();

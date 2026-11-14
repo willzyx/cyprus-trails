@@ -24,7 +24,10 @@ glance whether I am on a known trail and which areas I have already covered.
   shows the totals (trails and km done) and the nearest trail: "On trail" when
   you are inside its band, otherwise the distance to it. 📍 centers the map on
   you and follows you until you drag the map.
-- OpenStreetMap, OpenTopoMap (contour lines) and Esri satellite base maps.
+- OpenStreetMap, OpenTopoMap (contour lines), Esri satellite and hybrid
+  (satellite with roads and place names) base maps, with a metric scale bar.
+- The map is limited to Cyprus and the sea around it, so it cannot be dragged
+  away by accident.
 
 ## Running locally
 
